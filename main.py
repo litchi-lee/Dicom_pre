@@ -7,6 +7,7 @@ import cv2
 import h5py
 import imageio
 import numpy as np
+import parmap
 import pydicom as dc
 import scipy.ndimage as ndimage
 import SimpleITK as sitk
@@ -15,6 +16,18 @@ from scipy.ndimage import zoom
 from tqdm import tqdm
 
 from ctxray_utils import load_scan_mhda, save_scan_mhda
+
+
+# 只保留以keyword开头的文件名的文件
+def delete_unwanted_files(directory, keyword="2-"):
+    # 获取目录下所有文件
+    all_files = glob.glob(os.path.join(directory, '*'))
+
+    # 遍历所有文件
+    for file in all_files:
+        # 如果文件名不是以“2-”开头，则删除
+        if not os.path.basename(file).startswith(keyword):
+            os.remove(file)
 
 
 def dicom_to_mhd(
@@ -334,7 +347,7 @@ def resize_image(image_root, new_size=(320, 320)):
     """
     image_list = glob.glob(os.path.join(image_root, "*", "*.png"))
     for image_path in image_list:
-        image_save_path = image_path.replace("xrays", "ctpro")
+        image_save_path = image_path.replace(image_root, "2_ctpro")
         save_dir = os.path.dirname(image_save_path)
 
         # 如果保存路径中的文件夹不存在，则创建它
@@ -436,7 +449,7 @@ class Resize_image(object):
         return img_copy
 
 
-def ct_preprocessing(root_path, trg_ct_res, Save_path):
+def ct_preprocessing(dir_list, trg_ct_res, Save_path):
     '''
     root_path: str, path to the data
     trg_ct_res: int, target resolution
@@ -444,7 +457,6 @@ def ct_preprocessing(root_path, trg_ct_res, Save_path):
     '''
     base_ct_res = [320, 320, 320]
     file_name = "ct_xray_data.h5"
-    dir_list = glob.glob(os.path.join(root_path, '*'))
 
     # 遍历.h5文件目录
     for dir in tqdm(dir_list):
@@ -504,22 +516,52 @@ if __name__ == "__main__":
     # 4063265 R 取镜像左边
     # 4400662 L 取镜像右边
 
+    # 0. 准备数据，只保留每个病人的单一序列CT
+    source_data_root = "0_data"
+    source_data_dir_list = glob.glob(os.path.join(source_data_root, "*", "*"))
+    # * 为通配符，表示匹配所有文件
+    keyword_list = ["2", "3"]
+    for keyword in keyword_list:
+        keyword = f"{keyword}-"
+    for source_data_dir, keyword in zip(source_data_dir_list, keyword_list):
+        delete_unwanted_files(source_data_dir, keyword)
+
     # 1. 将DICOM文件转换为MHD文件
-    # dicom_to_mhd(folders_path="data", save_path="mhd", crop_type_list=[0, 4])
+    # * 定义裁剪类型
+    data_crop_type_list = [0, 4]
+    dicom_to_mhd(
+        folders_path="0_data", save_path="1_mhd", crop_type_list=data_crop_type_list
+    )
 
     # 2. 将CT扫描重采样到新的像素间距，然后裁剪到标准形状
-    # process_ct_scans(root_path="mhd", save_root_path="ctpro")
+    process_ct_scans(root_path="1_mhd", save_root_path="2_ctpro")
 
     # 3. 将X光图像裁剪到标准形状
-    # resize_image(image_root="xrays", new_size=(320, 320))
+    resize_image(image_root="0_xrays", new_size=(320, 320))
 
     # 4. 创建HDF5数据集
-    # make_h5_dataset_LIDC(
-    #     mda_root_path="ctpro",
-    #     save_ct_path="ctpro_hdf5",
-    #     save_xray_path="xrays_hdf5",
-    #     xray_size=128,
-    # )
+    make_h5_dataset_LIDC(
+        mda_root_path="2_ctpro",
+        save_ct_path="3_ctpro_hdf5",
+        save_xray_path="3_xrays_hdf5",
+        xray_size=256,
+    )
 
-    # 5. resize CT Xray
-    ct_preprocessing("ctpro_hdf5", 128, "ct_slice")
+    # # 5. 重剪裁CT和Xray图像
+    # ct_root_dir = "3_ctpro_hdf5"
+    # ct_save_dir = "4_ct_slice"
+    # target_res = 128
+
+    # dir_list = glob.glob(os.path.join(ct_root_dir, '*', '*'))
+    # # 这里开并行处理了，如果开销太大将pm_processes设置为1即可
+    # pm_processes = int(os.cpu_count() / 2)
+    # if pm_processes == 1:
+    #     ct_preprocessing((dir_list, target_res, ct_save_dir))
+    # else:
+    #     data_splits = np.array_split(dir_list, pm_processes)
+    #     parmap.starmap(
+    #         ct_preprocessing,
+    #         [(split, target_res, ct_save_dir) for split in data_splits],
+    #         pm_pbar=True,
+    #         pm_processes=pm_processes,
+    #     )
